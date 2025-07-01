@@ -1,65 +1,117 @@
-library(tidyverse)#o que cada um de nós estamos usando?
+library(tidyverse)
 library(cluster)
 library(factoextra)#fviz_nbclust(), fviz_pca_ind()
 library(dbscan)
-library(Rtsne)        # t-SNE para visualização não-linear
-library(ClusterR)
+library(Rtsne)
+#library(ClusterR)
 library(plotly)
+library(gridExtra)
+library(GGally)
 
+#leitura e inspeção simplificada dos dados
 data_raw <- read_csv("C:/dev/DM/BitcoinHeistData.csv", show_col_types = FALSE)
+glimpse(data_raw)
 
-glimpse(data_raw)#Inspeção simplificada em comparação à -> str(), summary()...
 
-#sem valores ausentes, sem tratamento de NA
+#seleção de variáveis para clustering (remove address, label e então linhas duplicadas)
+features <- data_raw %>% select(-address, -label) %>% distinct()
+glimpse(features)
 
-#seleção de variáveis para clustering
-features <- data_raw %>% select(-address, -label)#remove address e label
 
-#normalização (scaling) dos dados
-##features_scaled <- scale(features)#dados completos
-features_sample <- sample_n(as.data.frame(features), 8001)
+#amostragem e normalização (scaling) dos dados
+set.seed(1903)
+features_sample <- sample_n(as.data.frame(features), 2017)
 features_scaled <- scale(features_sample)
 
+c1 = ggplot (features_sample, aes(x = income, y = length)) + geom_point() +
+  labs (title="Conjunto Original (sample)", x = "Income", y = "Length") + theme_bw()
+
+c2 = ggplot (features_scaled, aes(x = income, y = length)) + geom_point() +
+  labs (title="Conjunto Normalizado (sample)", x = "Income", y = "Length") + theme_bw()
+
+grid.arrange(c1, c2, ncol=2)#mostra que a normalização para agrupamento é importante e não interfere na distribuição dos pontos
+
+
 #determina número ideal de clusters para K-Means via método do cotovelo ( O(k_max × n × k × i × d) )
-set.seed(3)
-fviz_nbclust(features_scaled, kmeans, method = "wss", k.max = 10) + labs(title = "Elbow Method (amostra de 1000)")
+set.seed(1981)
+fviz_nbclust(features_scaled, kmeans, method = "wss", k.max = 10) + 
+  labs(title = "Elbow Method (amostra de 1000)")#y=soma total de quadrados dentro do cluster
+
+
+#análise de distância (Heatmap)
+#dist_matrix <- get_dist(features_scaled)
+#fviz_dist(dist_matrix, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07")) + labs(title = "Distância entre observações (amostra)")
+
 
 #executando K-Means
-set.seed(1)
-k <- 3#substituir pelo valor indicado pelo método do cotovelo
-##km_res <- kmeans(features_scaled, centers = k, nstart = 10)
-km_res <- KMeans_rcpp(features_scaled, clusters = k, num_init = 5, max_iters = 100)#mais otimizado (Cpp)
+set.seed(1983)
+k <- 2#substituir pelo valor indicado pelo método do cotovelo
+km_res <- kmeans(features_scaled, centers = k, nstart = 10)#km_res <- KMeans_rcpp(features_scaled, clusters = k, num_init = 5, max_iters = 100)
+predict <- km_res$cluster#cluster ao qual cada ponto é alocado (vetor)
+predict
+km_res$centers#centros de cluster (matriz)
+km_res$size#pontos por cluster
+sampled_data <- features_sample %>% mutate(cluster_kmeans = factor(km_res$cluster))#nova coluna chamada cluster_kmeans em sampled_data. coluna para linha = cluster ao qual o ponto correspondente foi atribuído pelo K-Means
 
-#clusters -> amostra/dataset
-##data_raw$cluster_kmeans <- factor(km_res$cluster)
-sampled_data <- features_sample %>% mutate(cluster_kmeans = factor(km_res$cluster))
+km_res$betweenss#soma entre os quadrados dos aglomerados (deve ser alta)
+km_res$withinss#vetor da soma de quadrados dentro do cluster (deve ser baixa)
+km_res$tot.withinss#soma total de quadrados dentro do cluster
+km_res$totss#total soma dos quadrados
 
-#view clusters em PCA
+aggregate(features_sample, by=list(predict), mean)#média de valores para cada cluster
+
+
+#agrupamento
+#ggpairs(cbind(features_sample, cluster=as.factor(predict)),
+#        columns=1:8, aes(colour=cluster, alpha=0.5),
+#        lower=list(continuous="points"),
+#        upper=list(continuous="blank"),
+#        axisLabels="none", switch="both") + theme_bw()
+
+#plot(features_scaled[,1:8], col=predict)
+#plot(predict)
+#clusplot(features_scaled,predict, color = T, lines = F, labels = 4)
+
+#comparar clusters K-Means com label de ransomware (incluir label na amostra)
+sampled_labeled <- data_raw %>% slice_sample(n = nrow(sampled_data), replace = FALSE) %>% mutate(cluster_kmeans = sampled_data$cluster_kmeans)
+conf_matrix <- table(sampled_labeled$label, sampled_labeled$cluster_kmeans)
+print(conf_matrix)
+
+
+#view clusters K-Means via PCA
 pca_res <- prcomp(features_scaled, center = TRUE, scale. = TRUE)
+
 fviz_pca_ind(pca_res, geom.ind = "point", label = FALSE,
-             habillage = sampled_data$cluster_kmeans,#data_raw = sampled_data
+             habillage = sampled_data$cluster_kmeans,
              palette = "jco", addEllipses = FALSE) +
   labs(title = "Clusters K-Means em PCA")
+
+
+#view para diferentes k
+#for (k_test in 2:5) {
+#  cl <- kmeans(features_scaled, centers = k_test)
+#  fviz_cluster(cl, data = features_scaled) + labs(title = paste(k_test, "clusters em sample")) %>% print()
+#}
+
 
 #executando DBSCAN (eps e minPts com kNNdistplot)
 kNNdistplot(features_scaled, k = 5)
 abline(h = 1.2, lty = 2)#ajustar eps baseado no gráfico
-
 db_res <- dbscan(features_scaled, eps = 1.2, minPts = 5)
+sampled_data$cluster_dbscan <- factor(db_res$cluster)#clusters -> DBSCAN
 
-#clusters -> DBSCAN
-sampled_data$cluster_dbscan <- factor(db_res$cluster)#data_raw = sampled_data
 
-#view DBSCAN em PCA
+#view DBSCAN em PCA (ideal para identificar pontos que não pertencem a nenhum cluster denso. outliers)
 fviz_pca_ind(pca_res, geom.ind = "point", label = FALSE,
-             habillage = sampled_data$cluster_dbscan,#data_raw = sampled_data
-             palette = "Dark2", addEllipses = TRUE) +
+             habillage = sampled_data$cluster_dbscan,
+             palette = "Dark2", addEllipses = FALSE) +
   labs(title = "Clusters DBSCAN em PCA")
 
-#view com t-SNE
-set.seed(2)
+
+#view t-SNE
+set.seed(2017)
 tsne_res <- Rtsne(features_scaled, perplexity = 30)
-tsne_df <- data.frame(tsne_res$Y, cluster_kmeans = sampled_data$cluster_kmeans)
+tsne_df <- data.frame(tsne_res$Y, cluster_kmeans = sampled_data$cluster_kmeans) 
 
 tsne_plot <- ggplot(tsne_df, aes(x = X1, y = X2, color = cluster_kmeans)) +
   geom_point(alpha = 0.7) +
@@ -67,6 +119,3 @@ tsne_plot <- ggplot(tsne_df, aes(x = X1, y = X2, color = cluster_kmeans)) +
   theme_minimal()
 
 ggplotly(tsne_plot)
-#comparar clusters K-Means com label de ransomware
-#conf_matrix <- table(data_raw$label, sampled_data)
-#print(conf_matrix)
